@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Validador de correos de autoescuelas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1c2430;--mute:#667085;--line:#dfe3ea;--brand:#1f4fd8;--bad:#c2261f;--badbg:#fdeceb;--ok:#18794e;--okbg:#e6f5ee}
+@media(prefers-color-scheme:dark){:root{--bg:#12161d;--card:#1b212b;--ink:#e8ecf2;--mute:#9aa4b2;--line:#2b3340;--brand:#6c93ff;--bad:#ff8a82;--badbg:#3a1f1e;--ok:#5fd09b;--okbg:#17352a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:960px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:1.6rem;margin:0 0 4px}
+p.sub{margin:0 0 24px;color:var(--mute)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:20px}
+#drop{border:2px dashed var(--line);border-radius:10px;padding:32px;text-align:center;cursor:pointer;color:var(--mute)}
+#drop.over,#drop:focus-visible{border-color:var(--brand);outline:none;color:var(--ink)}
+button,select{font:inherit;border-radius:8px;border:1px solid var(--line);padding:8px 14px;background:var(--card);color:var(--ink)}
+button.primary{background:var(--brand);border-color:var(--brand);color:#fff;cursor:pointer}
+button:focus-visible,select:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.stat{padding:12px 14px;border-radius:8px;background:var(--bg)}
+.stat b{display:block;font-size:1.5rem}
+.stat.bad{background:var(--badbg);color:var(--bad)}.stat.ok{background:var(--okbg);color:var(--ok)}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:600}
+td.mail{color:var(--bad);word-break:break-all}
+.hidden{display:none}
+label{color:var(--mute);font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>Validador de correos de autoescuelas</h1>
+  <p class="sub">Sube tu Excel y comprueba qué correos no son válidos o no terminan en .com, .es o .net.</p>
+
+  <div class="card">
+    <div id="drop" tabindex="0" role="button">Arrastra aquí tu archivo Excel (.xlsx, .xls o .csv) o haz clic para elegirlo</div>
+    <input id="file" type="file" accept=".xlsx,.xls,.csv" class="hidden">
+    <p id="fname" class="sub" style="margin:12px 0 0"></p>
+  </div>
+
+  <div id="panel" class="hidden">
+    <div class="card row">
+      <label for="col">Columna de correo</label>
+      <select id="col"></select>
+      <label for="sheet">Hoja</label>
+      <select id="sheet"></select>
+      <button class="primary" id="run">Comprobar correos</button>
+    </div>
+
+    <div id="results" class="hidden">
+      <div class="card">
+        <div class="stats" id="stats"></div>
+      </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:12px">
+          <strong id="ttl"></strong>
+          <button class="primary" id="export">Exportar incorrectos a Excel</button>
+        </div>
+        <div class="wrap"><table>
+          <thead><tr><th>Fila</th><th>Autoescuela</th><th>Correo</th><th>Motivo</th></tr></thead>
+          <tbody id="body"></tbody>
+        </table></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+let wb=null, rows=[], headers=[], bad=[];
+
+const drop=$('drop'), fileIn=$('file');
+drop.onclick=()=>fileIn.click();
+drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fileIn.click()}};
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');if(e.dataTransfer.files[0])load(e.dataTransfer.files[0])};
+fileIn.onchange=()=>{if(fileIn.files[0])load(fileIn.files[0])};
+
+function load(f){
+  const r=new FileReader();
+  r.onload=e=>{
+    wb=XLSX.read(e.target.result,{type:'array'});
+    $('fname').textContent='Archivo: '+f.name;
+    $('sheet').innerHTML=wb.SheetNames.map((n,i)=>`<option value="${i}">${esc(n)}</option>`).join('');
+    readSheet();
+    $('panel').classList.remove('hidden');
+    $('results').classList.add('hidden');
+  };
+  r.readAsArrayBuffer(f);
+}
+$('sheet').onchange=readSheet;
+
+function readSheet(){
+  const ws=wb.Sheets[wb.SheetNames[$('sheet').value]];
+  rows=XLSX.utils.sheet_to_json(ws,{defval:''});
+  headers=rows.length?Object.keys(rows[0]):[];
+  // detectar columna de correo: por nombre y, si no, por contenido con @
+  let guess=headers.findIndex(h=>/mail|correo/i.test(h));
+  if(guess<0){
+    let best=0;
+    headers.forEach((h,i)=>{const c=rows.slice(0,200).filter(r=>String(r[h]).includes('@')).length;if(c>best){best=c;guess=i}});
+  }
+  $('col').innerHTML=headers.map((h,i)=>`<option value="${i}">${esc(h)}</option>`).join('');
+  if(guess>=0)$('col').value=guess;
+}
+
+function check(addr){
+  if(!/^[^\s@]+@[^\s@]+$/.test(addr)){
+    if(!addr.includes('@'))return 'Falta la @';
+    return 'Formato incorrecto';
+  }
+  const dom=addr.split('@')[1].toLowerCase();
+  if(!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(dom))return 'Dominio incorrecto';
+  if(!(dom.endsWith('.com')||dom.endsWith('.es')||dom.endsWith('.net')))return 'Dominio no es .com, .es ni .net (.'+dom.split('.').pop()+')';
+  return '';
+}
+
+$('run').onclick=()=>{
+  const col=headers[$('col').value];
+  const nameCol=headers.find((h,i)=>h!==col&&/nombre|autoescuela|empresa|raz/i.test(h))||headers.find(h=>h!==col)||'';
+  bad=[];let ok=0,empty=0,total=0;
+  rows.forEach((r,i)=>{
+    const raw=String(r[col]).trim();
+    if(!raw){empty++;return}
+    raw.split(/[;,\s]+/).filter(Boolean).forEach(a=>{
+      total++;
+      const why=check(a);
+      if(why)bad.push({fila:i+2,nombre:nameCol?r[nameCol]:'',mail:a,why,row:r});
+      else ok++;
+    });
+  });
+  $('stats').innerHTML=
+    `<div class="stat">Correos revisados<b>${total}</b></div>`+
+    `<div class="stat ok">Correctos<b>${ok}</b></div>`+
+    `<div class="stat bad">Incorrectos<b>${bad.length}</b></div>`+
+    `<div class="stat">Filas sin correo<b>${empty}</b></div>`;
+  $('ttl').textContent=bad.length?`Correos incorrectos (${bad.length})`:'No se ha encontrado ningún correo incorrecto';
+  $('body').innerHTML=bad.map(b=>`<tr><td>${b.fila}</td><td>${esc(b.nombre)}</td><td class="mail">${esc(b.mail)}</td><td>${esc(b.why)}</td></tr>`).join('');
+  $('export').disabled=!bad.length;
+  $('results').classList.remove('hidden');
+};
+
+$('export').onclick=()=>{
+  const out=bad.map(b=>({'Fila original':b.fila,...b.row,'Correo revisado':b.mail,'Motivo':b.why}));
+  const ws=XLSX.utils.json_to_sheet(out);
+  const nb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(nb,ws,'Correos incorrectos');
+  XLSX.writeFile(nb,'correos-incorrectos.xlsx');
+};
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+</script>
+</body>
+</html>
